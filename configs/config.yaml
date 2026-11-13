@@ -1,0 +1,197 @@
+# ============================================================
+# MPIN Project Configuration File
+# Project: Missing Value Imputation for Multi-attribute Sensor Data Streams
+# Paper: arXiv:2311.07344 (VLDB 2023)
+# ============================================================
+
+# -------------------------------------------------------
+# General Settings
+# -------------------------------------------------------
+general:
+  seed: 42                    # Random seed for reproducibility
+  device: "cuda"              # "cuda" or "cpu"
+  log_level: "INFO"           # Logging level: DEBUG, INFO, WARNING, ERROR
+  output_dir: "results/"      # Base output directory
+
+# -------------------------------------------------------
+# ICU Dataset Settings (PhysioNet Challenge 2012)
+# -------------------------------------------------------
+icu:
+  name: "icu"
+  raw_data_dir: "data/raw/icu/"
+  processed_dir: "data/processed/icu/"
+  X_path: "data/processed/icu/X_icu.npy"
+  M_path: "data/processed/icu/M_icu.npy"
+  y_path: "data/processed/icu/y_icu.npy"
+
+  # Data dimensions
+  num_streams: 11988          # J: number of patient streams
+  num_timesteps: 48           # T: hours of ICU stay
+  num_attributes: 37          # D: number of physiological measurements
+  sparsity: 0.80              # Approximate missing rate
+
+  # Windowing
+  window_size: 12             # T_w: tumbling window size (hours)
+  stride: 12                  # Non-overlapping (tumbling)
+
+  # Train/test split
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+  # Normalization
+  normalization: "minmax"     # "minmax" or "zscore"
+
+# -------------------------------------------------------
+# Airquality Dataset Settings
+# -------------------------------------------------------
+airquality:
+  name: "airquality"
+  raw_data_dir: "data/raw/airquality/"
+  processed_dir: "data/processed/airquality/"
+  X_path: "data/processed/airquality/X_airquality.npy"
+  M_path: "data/processed/airquality/M_airquality.npy"
+
+  # Data dimensions
+  num_streams: null           # J: number of monitoring stations (fill after download)
+  num_timesteps: null         # T: will be set by window_size
+  num_attributes: 11          # D: PM2.5, PM10, SO2, NO2, CO, O3, Temp, Pres, Dewp, Rain, WS
+
+  # Windowing
+  window_size: 24             # T_w: 24-hour window
+  stride: 24                  # Non-overlapping (tumbling)
+
+  # Train/test split
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+
+  # Normalization
+  normalization: "minmax"
+
+# -------------------------------------------------------
+# MPIN Model Settings
+# -------------------------------------------------------
+mpin:
+  # Similarity graph construction
+  K: 10                       # Number of KNN neighbors
+  graph_metric: "euclidean"   # Distance metric for KNN graph
+  symmetric: true             # Make graph undirected (if i in N(j), add j in N(i))
+
+  # MsgProp layers (GraphSAGE-style)
+  num_layers: 2               # Number of message propagation layers
+  hidden_dim: 64              # Hidden dimension (if added)
+  dropout: 0.0                # Dropout rate
+
+  # Training (transductive)
+  epochs: 100                 # Number of training epochs
+  lr: 0.001                   # Learning rate (Adam)
+  weight_decay: 0.0001        # L2 regularization
+  val_split: 0.05             # 5% of observed values used as validation
+  patience: 20                # Early stopping patience
+  loss: "mse"                 # Loss function: "mse" or "mae"
+
+  # Loss weights (if combined loss)
+  lambda1: 1.0                # Weight for imputation loss
+  lambda2: 0.1                # Weight for regularization term
+
+  # Scheduler
+  use_scheduler: true
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+  min_lr: 0.00001
+
+  # Checkpoint
+  checkpoint_dir: "results/checkpoints/"
+  save_best: true
+
+# -------------------------------------------------------
+# MPIN-DM (Continuous Framework) Settings
+# -------------------------------------------------------
+mpin_dm:
+  enabled: true               # Whether to use continuous framework
+
+  # Data update
+  eta: 0.6                    # Importance score threshold (phi >= eta to keep)
+  max_keep: 500               # Maximum instances to keep from previous chunk
+
+  # Model update (transfer learning)
+  fine_tune_epochs: 20        # Epochs for warm-start fine-tuning
+  fine_tune_lr: 0.0001        # Lower LR for fine-tuning
+  update_modules: ["msgprop"] # Which modules to fine-tune
+
+# -------------------------------------------------------
+# Baseline Settings
+# -------------------------------------------------------
+baselines:
+  # KNN imputation
+  knn:
+    k: 5                      # Number of neighbors for KNN imputation
+
+  # Feature Propagation (FeaProp)
+  feature_propagation:
+    num_iterations: 10        # Number of propagation steps
+    alpha: 0.8                # Propagation coefficient
+
+  # MICE
+  mice:
+    max_iter: 10
+    random_state: 42
+
+  # Matrix Factorization
+  mf:
+    num_factors: 20
+    max_iter: 100
+    lr: 0.01
+
+# -------------------------------------------------------
+# Prediction Settings (Task 2 - ICU Mortality)
+# -------------------------------------------------------
+prediction:
+  dataset: "icu"              # Only ICU has labels
+  task: "classification"      # "classification" (binary) or "regression"
+  label_col: "mortality"      # Column name for label
+
+  # Logistic Regression
+  logistic:
+    C: 1.0                    # Inverse regularization strength
+    max_iter: 1000
+    class_weight: "balanced"  # Handle class imbalance
+    solver: "lbfgs"
+
+  # LSTM Predictor
+  lstm:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.3
+    epochs: 50
+    lr: 0.001
+    batch_size: 64
+    sequence_len: 48          # Use full 48-hour ICU stay
+
+  # Evaluation metrics
+  metrics: ["accuracy", "auc_roc", "f1", "precision", "recall"]
+
+  # Output
+  results_dir: "results/metrics/"
+
+# -------------------------------------------------------
+# Evaluation Settings
+# -------------------------------------------------------
+evaluation:
+  metrics: ["mae", "mre", "rmse"]   # Imputation evaluation metrics
+  epsilon: 1.0e-6                    # For MRE stability: avoid div by zero
+
+  # Where to save results
+  results_dir: "results/metrics/"
+  plots_dir: "results/plots/"
+
+# -------------------------------------------------------
+# Visualization Settings
+# -------------------------------------------------------
+visualization:
+  figsize: [12, 6]
+  dpi: 150
+  style: "seaborn-v0_8"
+  save_format: "png"
+  show_plots: false           # Set true to display plots interactively
