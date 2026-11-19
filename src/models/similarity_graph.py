@@ -140,6 +140,9 @@ def knn_graph(
     """
     N = dist_matrix.shape[0]
     adj = np.zeros((N, N), dtype=np.int32)
+    k_eff = min(k, max(N - 1, 0))
+    if k_eff == 0:
+        return adj
 
     # Set diagonal to infinity so nodes don't select themselves
     dist_matrix_no_self = dist_matrix.copy()
@@ -148,7 +151,7 @@ def knn_graph(
     # For each node, find K nearest neighbors
     for i in range(N):
         # argsort ascending: closest first
-        nn_indices = np.argsort(dist_matrix_no_self[i])[:k]
+        nn_indices = np.argsort(dist_matrix_no_self[i])[:k_eff]
         adj[i, nn_indices] = 1
 
     # Make symmetric (undirected graph)
@@ -222,6 +225,92 @@ def build_similarity_graph(
     adj = knn_graph(dist_matrix, k=k, symmetric=symmetric)
 
     return adj, X_filled
+
+
+def build_knn_edge_index(
+    X_chunk: np.ndarray,
+    M_chunk: np.ndarray,
+    k: int = 10,
+    metric: str = "euclidean",
+    symmetric: bool = True
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Scalably build a sparse KNN similarity graph in COO edge_index format.
+
+    Avoids constructing an O(N^2) dense distance or adjacency matrix by using
+    scikit-learn NearestNeighbors directly.
+
+    Parameters
+    ----------
+    X_chunk : np.ndarray, shape (N, D)
+        Data chunk with NaN at missing positions.
+    M_chunk : np.ndarray, shape (N, D)
+        Observation mask (1=observed, 0=missing).
+    k : int, default 10
+        Number of nearest neighbors per node.
+    metric : str, default "euclidean"
+        Distance metric ("euclidean", "cosine", "manhattan", "cityblock").
+    symmetric : bool, default True
+        Whether to make the graph undirected (if src->dst exists, add dst->src).
+
+    Returns
+    -------
+    edge_index : np.ndarray, shape (2, E), dtype int64
+        Directed edge list where edge_index[0] = source neighbor nodes and
+        edge_index[1] = target nodes.
+    X_filled : np.ndarray, shape (N, D)
+        Mean-filled version of X_chunk.
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    X_filled = fill_initial(X_chunk, M_chunk)
+    N = X_filled.shape[0]
+    k_eff = min(int(k), max(N - 1, 0))
+
+    if N <= 1 or k_eff <= 0:
+        return np.zeros((2, 0), dtype=np.int64), X_filled
+
+    metric_map = {
+        "euclidean": "euclidean",
+        "cosine": "cosine",
+        "manhattan": "manhattan",
+        "cityblock": "manhattan",
+    }
+    if metric not in metric_map:
+        raise ValueError(f"Unsupported metric '{metric}'. Choose from: {set(metric_map.keys())}")
+    sklearn_metric = metric_map[metric]
+
+    logger.info(
+        f"Building sparse KNN edge_index: N={N}, D={X_chunk.shape[1]}, "
+        f"K={k_eff}, metric={sklearn_metric}, symmetric={symmetric}"
+    )
+
+    nn_model = NearestNeighbors(
+        n_neighbors=k_eff + 1, metric=sklearn_metric, n_jobs=-1
+    )
+    nn_model.fit(X_filled)
+    _, indices = nn_model.kneighbors(X_filled)
+
+    # Strip self-loops robustly even when duplicate all-missing rows exist
+    is_self = (indices == np.arange(N)[:, None])
+    no_self_row = ~is_self.any(axis=1)
+    is_self[no_self_row, -1] = True
+    keep = ~is_self
+
+    src = indices[keep].astype(np.int64)
+    dst = np.repeat(np.arange(N, dtype=np.int64), k_eff)
+
+    if symmetric:
+        src_all = np.concatenate([src, dst])
+        dst_all = np.concatenate([dst, src])
+        keys = src_all * N + dst_all
+        _, uniq_idx = np.unique(keys, return_index=True)
+        src = src_all[uniq_idx]
+        dst = dst_all[uniq_idx]
+
+    edge_index = np.stack([src, dst], axis=0)
+    logger.info(f"Sparse KNN graph built: {N} nodes, {edge_index.shape[1]} directed edges.")
+    return edge_index, X_filled
 
 
 def adj_to_edge_index(adj: np.ndarray) -> np.ndarray:

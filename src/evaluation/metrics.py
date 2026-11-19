@@ -82,7 +82,7 @@ def mre(
     """
     Mean Relative Error on missing positions only.
 
-    MRE = (1/|M|) * Σ_{(i,d): M_missing[i,d]=1} |X_imputed[i,d] - X_true[i,d]| / (|X_true[i,d]| + ε)
+    MRE = Σ_{(i,d): M_missing[i,d]=1} |X_imputed[i,d] - X_true[i,d]| / (Σ_{(i,d): M_missing[i,d]=1} |X_true[i,d]| + ε)
 
     Parameters
     ----------
@@ -93,8 +93,7 @@ def mre(
     M_missing : np.ndarray, shape (N, D)
         1 at positions that were missing.
     epsilon : float, default 1e-6
-        Small constant added to denominator to avoid division by zero
-        (important when X_true contains zeros or near-zero values).
+        Small constant added to denominator to avoid division by zero.
 
     Returns
     -------
@@ -103,8 +102,8 @@ def mre(
 
     Notes
     -----
-    MRE is scale-independent, making it useful for comparing attributes
-    with very different value ranges (e.g., HR in [0,220] vs pH in [6.5,8]).
+    Using the sum-ratio definition (standard across BRITS/SAITS/MPIN) prevents
+    division-by-zero blowups when normalized ground truth entries equal zero.
     """
     missing_mask = M_missing.astype(bool)
     num_missing = missing_mask.sum()
@@ -116,8 +115,7 @@ def mre(
     true_vals = X_true[missing_mask]
     pred_vals = X_imputed[missing_mask]
 
-    relative_errors = np.abs(pred_vals - true_vals) / (np.abs(true_vals) + epsilon)
-    mre_val = relative_errors.mean()
+    mre_val = np.abs(pred_vals - true_vals).sum() / (np.abs(true_vals).sum() + epsilon)
 
     return float(mre_val)
 

@@ -223,8 +223,8 @@ def main():
         # Ground truth for evaluation
         X_true = X_chunk.copy()
 
-        # Build adjacency for graph-based methods
-        if args.method in ["mpin", "mpin_dm", "feaprop", "all"]:
+        # Build adjacency for dense-graph baseline (FeaProp); MPIN builds sparse edge_index internally
+        if args.method in ["feaprop", "all"]:
             adj, _ = build_similarity_graph(
                 X_eval, M_eval_obs,
                 k=config.get("mpin", {}).get("K", 10)

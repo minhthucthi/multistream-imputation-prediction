@@ -35,7 +35,7 @@ import copy
 import logging
 
 from src.models.mpin import MPIN, train_mpin
-from src.models.similarity_graph import build_similarity_graph
+from src.models.similarity_graph import build_knn_edge_index
 
 logger = logging.getLogger(__name__)
 
@@ -116,22 +116,23 @@ class MPINcontinuous:
         X_aug, M_aug = self.data_update(X_chunk, M_chunk)
 
         # --- Step 2: Build similarity graph ---
-        adj, _ = build_similarity_graph(
+        edge_index, _ = build_knn_edge_index(
             X_aug, M_aug,
             k=self.mpin_cfg.get("K", 10),
-            metric=self.mpin_cfg.get("graph_metric", "euclidean")
+            metric=self.mpin_cfg.get("graph_metric", "euclidean"),
+            symmetric=self.mpin_cfg.get("symmetric", True)
         )
 
         # --- Step 3: Model Update (or initial training) ---
         if self._prev_model is None:
             # First window: train from scratch
             logger.info("First window – training MPIN from scratch.")
-            model, X_imputed, _ = train_mpin(X_aug, M_aug, adj, self.config)
+            model, X_imputed, _ = train_mpin(X_aug, M_aug, edge_index, self.config)
         else:
             # Subsequent windows: warm-start fine-tuning
             logger.info(f"Window {self._window_count} – fine-tuning from previous model.")
             model, X_imputed = self.model_update(
-                self._prev_model, X_aug, M_aug, adj
+                self._prev_model, X_aug, M_aug, edge_index
             )
 
         # --- Step 4: Update internal state ---
@@ -218,8 +219,8 @@ class MPINcontinuous:
 
         This is the "Model Update" step of MPIN-DM:
         - Start from the previous window's model weights (warm-start)
-        - Fine-tune only the message passing module for a few epochs
-        - This is faster than full retraining and prevents forgetting
+        - Fine-tune via `train_mpin` with lower learning rate and fewer epochs
+        - Avoids full retraining from scratch while reusing self-supervised masking
 
         Parameters
         ----------
@@ -229,8 +230,8 @@ class MPINcontinuous:
             Augmented data chunk for current window.
         M_aug : np.ndarray, shape (N_aug, D)
             Augmented mask.
-        adj : np.ndarray, shape (N_aug, N_aug)
-            Similarity graph for augmented chunk.
+        adj : np.ndarray
+            Sparse edge_index (2, E) or dense adjacency matrix (N_aug, N_aug).
 
         Returns
         -------
@@ -239,95 +240,24 @@ class MPINcontinuous:
         X_imputed : np.ndarray, shape (N_aug, D)
             Imputed data from the fine-tuned model.
         """
-        N, D = X_aug.shape
-
-        # Clone previous model to avoid modifying shared state
         model = copy.deepcopy(prev_model).to(self.device)
-
-        # --- Create fine-tuning config ---
-        ft_config = copy.deepcopy(self.config)
-        ft_config["mpin"]["epochs"] = self.fine_tune_epochs
-        ft_config["mpin"]["lr"] = self.fine_tune_lr
-        ft_config["mpin"]["patience"] = max(5, self.fine_tune_epochs // 4)
-
-        # --- Freeze non-MsgProp layers (optional) ---
-        # For now, fine-tune all parameters (simple transfer learning)
         for param in model.parameters():
             param.requires_grad = True
 
-        # --- Setup fine-tuning ---
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=self.fine_tune_lr,
-            weight_decay=self.mpin_cfg.get("weight_decay", 1e-4)
+        ft_config = copy.deepcopy(self.config)
+        ft_mpin = ft_config.setdefault("mpin", {})
+        ft_mpin["epochs"] = self.fine_tune_epochs
+        ft_mpin["lr"] = self.fine_tune_lr
+        ft_mpin["patience"] = max(5, self.fine_tune_epochs // 2)
+
+        model, X_imputed, history = train_mpin(
+            X_aug, M_aug, adj, ft_config, init_model=model
         )
-
-        # Prepare tensors
-        X_no_nan = np.nan_to_num(X_aug, nan=0.0).astype(np.float32)
-        M_float = M_aug.astype(np.float32)
-
-        # Mean-fill initial features
-        X_mean_filled = X_no_nan.copy()
-        for d in range(D):
-            obs = M_float[:, d].astype(bool)
-            fill_val = X_no_nan[obs, d].mean() if obs.sum() > 0 else 0.0
-            X_mean_filled[~obs, d] = fill_val
-
-        X_init_t = torch.tensor(X_mean_filled, dtype=torch.float32, device=self.device)
-        X_obs_t = torch.tensor(X_no_nan, dtype=torch.float32, device=self.device)
-        M_t = torch.tensor(M_float, dtype=torch.float32, device=self.device)
-        Adj_t = torch.tensor(adj, dtype=torch.float32, device=self.device)
-
-        # Validation split
-        obs_positions = np.argwhere(M_aug == 1)
-        num_val = max(1, int(len(obs_positions) * 0.05))
-        val_idx = np.random.choice(len(obs_positions), size=num_val, replace=False)
-        val_i = obs_positions[val_idx, 0]
-        val_d = obs_positions[val_idx, 1]
-        val_i_t = torch.tensor(val_i, dtype=torch.long, device=self.device)
-        val_d_t = torch.tensor(val_d, dtype=torch.long, device=self.device)
-
-        M_train_t = M_t.clone()
-        M_train_t[val_i_t, val_d_t] = 0.0
-
-        best_val_loss = float("inf")
-        best_state = None
-
-        model.train()
-        for epoch in range(self.fine_tune_epochs):
-            optimizer.zero_grad()
-            X_pred = model(X_init_t, Adj_t, X_obs_t, M_train_t)
-            loss = F.mse_loss(
-                X_pred * M_train_t,
-                X_obs_t * M_train_t,
-                reduction="sum"
-            ) / (M_train_t.sum() + 1e-8)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-            with torch.no_grad():
-                val_loss = F.mse_loss(
-                    X_pred[val_i_t, val_d_t],
-                    X_obs_t[val_i_t, val_d_t]
-                ).item()
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_state = {k: v.clone() for k, v in model.state_dict().items()}
-
-        if best_state:
-            model.load_state_dict(best_state)
-
-        # Final inference
-        model.eval()
-        with torch.no_grad():
-            X_imputed_t = model(X_init_t, Adj_t, X_obs_t, M_t)
-        X_imputed = X_imputed_t.cpu().numpy()
-
+        val_losses = history.get("val_losses", [])
+        best_val = min(val_losses) if val_losses else float("nan")
         logger.info(
-            f"Model update complete: {self.fine_tune_epochs} epochs, "
-            f"best_val_loss={best_val_loss:.6f}"
+            f"Model update complete: {len(val_losses)} epochs, "
+            f"best_val_loss={best_val:.6f}"
         )
         return model, X_imputed
 

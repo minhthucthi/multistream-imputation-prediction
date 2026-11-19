@@ -33,7 +33,7 @@ from src.models.baselines import (
     mice_imputation,
     mf_imputation
 )
-from src.models.similarity_graph import build_similarity_graph
+from src.models.similarity_graph import build_similarity_graph, build_knn_edge_index
 from src.models.mpin import train_mpin
 from src.evaluation.metrics import evaluate_all, create_evaluation_mask
 
@@ -191,15 +191,17 @@ def run_mpin(
     logger.info("Running MPIN imputation...")
     t0 = time.time()
 
-    # Build similarity graph
-    adj, _ = build_similarity_graph(
+    # Build sparse similarity graph (O(E) memory)
+    mpin_cfg = config.get("mpin", {})
+    edge_index, _ = build_knn_edge_index(
         X_chunk, M_chunk,
-        k=config.get("mpin", {}).get("K", 10),
-        metric=config.get("mpin", {}).get("graph_metric", "euclidean")
+        k=mpin_cfg.get("K", 10),
+        metric=mpin_cfg.get("graph_metric", "euclidean"),
+        symmetric=mpin_cfg.get("symmetric", True)
     )
 
     # Train and impute
-    model, X_imputed, train_history = train_mpin(X_chunk, M_chunk, adj, config)
+    model, X_imputed, train_history = train_mpin(X_chunk, M_chunk, edge_index, config)
 
     elapsed = time.time() - t0
 
