@@ -60,7 +60,11 @@ class DataLoader:
     # ICU Dataset
     # ------------------------------------------------------------------
 
-    def load_icu_dataset(self, path: str) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    def load_icu_dataset(
+        self,
+        path: str,
+        max_streams: Optional[int] = None
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Load ICU dataset from PhysioNet Challenge 2012 raw files.
 
@@ -72,6 +76,9 @@ class DataLoader:
         path : str
             Path to raw ICU directory containing set-a/, set-b/ subdirs
             and Outcomes-a.txt, Outcomes-b.txt label files.
+        max_streams : int, optional
+            If provided (or set in config['icu']['max_streams']), slice the
+            returned tensors to at most max_streams patients.
 
         Returns
         -------
@@ -85,59 +92,59 @@ class DataLoader:
         """
         logger.info(f"Loading ICU dataset from: {path}")
 
-        # TODO: Implement full ICU loading pipeline
-        # Step 1: Scan all patient files in set-a/ and set-b/
-        # Step 2: Parse each .txt file into a dict {param: [(time, value), ...]}
-        # Step 3: Bucket timestamps into 1-hour bins (bin 0 = hours [0,1))
-        # Step 4: Build tensor X of shape (J, 48, 37)
-        # Step 5: Build mask M (True where not NaN)
-        # Step 6: Load labels from Outcomes-a.txt / Outcomes-b.txt
+        if max_streams is None:
+            max_streams = self.config.get("icu", {}).get("max_streams")
 
-        # --- Placeholder Implementation ---
-        processed_X_path = os.path.join(
-            self.config.get("icu", {}).get("processed_dir", "data/processed/icu/"),
-            "X_icu.npy"
-        )
-        processed_M_path = os.path.join(
-            self.config.get("icu", {}).get("processed_dir", "data/processed/icu/"),
-            "M_icu.npy"
-        )
-        processed_y_path = os.path.join(
-            self.config.get("icu", {}).get("processed_dir", "data/processed/icu/"),
-            "y_icu.npy"
-        )
+        processed_dir = self.config.get("icu", {}).get("processed_dir", "data/processed/icu/")
+        processed_X_path = os.path.join(processed_dir, "X_icu.npy")
+        processed_M_path = os.path.join(processed_dir, "M_icu.npy")
+        processed_y_path = os.path.join(processed_dir, "y_icu.npy")
 
-        if os.path.exists(processed_X_path):
+        if os.path.exists(processed_X_path) and os.path.exists(processed_M_path):
             logger.info("Loading pre-processed ICU data from cache.")
             X = np.load(processed_X_path, allow_pickle=True)
             M = np.load(processed_M_path, allow_pickle=True)
             y = np.load(processed_y_path, allow_pickle=True) if os.path.exists(processed_y_path) else None
-            logger.info(f"Loaded X: {X.shape}, M: {M.shape}")
-            return X, M, y
+        else:
+            set_a_dir = os.path.join(path, "set-a")
+            if not os.path.exists(set_a_dir):
+                raise FileNotFoundError(
+                    f"ICU raw data not found at {set_a_dir}. "
+                    "Please run: python scripts/download_data.py --dataset icu"
+                )
 
-        # If raw data exists, parse it
-        set_a_dir = os.path.join(path, "set-a")
-        set_b_dir = os.path.join(path, "set-b")
+            X, M, y = self._parse_icu_directory(path)
 
-        if not os.path.exists(set_a_dir):
-            raise FileNotFoundError(
-                f"ICU raw data not found at {set_a_dir}. "
-                "Please run: python scripts/download_data.py --dataset icu"
-            )
+            # Save processed data
+            os.makedirs(processed_dir, exist_ok=True)
+            np.save(processed_X_path, X)
+            np.save(processed_M_path, M)
+            if y is not None:
+                np.save(processed_y_path, y)
+            logger.info(f"Saved processed ICU tensors to {processed_dir}")
 
-        # TODO: Implement _parse_icu_directory
-        X, M, y = self._parse_icu_directory(path)
+        if max_streams is not None and max_streams < X.shape[0]:
+            logger.info(f"Slicing ICU dataset to first {max_streams} streams (from {X.shape[0]}).")
+            X = X[:max_streams]
+            M = M[:max_streams]
+            if y is not None:
+                y = y[:max_streams]
 
-        # Save processed data
-        os.makedirs(os.path.dirname(processed_X_path), exist_ok=True)
-        np.save(processed_X_path, X)
-        np.save(processed_M_path, M)
-        if y is not None:
-            np.save(processed_y_path, y)
-
+        logger.info(f"Loaded X: {X.shape}, M: {M.shape}")
         return X, M, y
 
-    def _parse_icu_directory(self, path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _load_outcomes_map(self, path: str) -> dict:
+        """Load RecordID -> In-hospital_death mapping from Outcomes-*.txt files."""
+        outcomes = {}
+        for fname in ["Outcomes-a.txt", "Outcomes-b.txt"]:
+            fpath = os.path.join(path, fname)
+            if os.path.exists(fpath):
+                df = pd.read_csv(fpath)
+                for _, row in df.iterrows():
+                    outcomes[int(row["RecordID"])] = int(row["In-hospital_death"])
+        return outcomes
+
+    def _parse_icu_directory(self, path: str) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Parse ICU raw text files into tensors.
 
@@ -150,20 +157,73 @@ class DataLoader:
         -------
         X : np.ndarray, shape (J, 48, 37) with NaN for missing
         M : np.ndarray, shape (J, 48, 37), bool mask
-        y : np.ndarray, shape (J,), int labels
+        y : np.ndarray, shape (J,), int labels or None
         """
-        # TODO: Full implementation
-        # For each patient file in set-a/, set-b/:
-        #   1. Read CSV-like content
-        #   2. Convert 'Time' string "HH:MM" to hour index (0-47)
-        #   3. Map 'Parameter' to attribute index using ICU_ATTRIBUTES
-        #   4. Fill in X[patient_idx, hour_idx, attr_idx] = value
-        # Then load labels from Outcomes-*.txt
+        patient_files = []
+        for subdir in ["set-a", "set-b"]:
+            subdir_path = os.path.join(path, subdir)
+            if os.path.isdir(subdir_path):
+                files = sorted(
+                    os.path.join(subdir_path, f)
+                    for f in os.listdir(subdir_path)
+                    if f.endswith(".txt")
+                )
+                patient_files.extend(files)
 
-        raise NotImplementedError(
-            "TODO: Implement _parse_icu_directory. "
-            "See doc/05_dataset_guide.md for file format details."
-        )
+        if not patient_files:
+            raise FileNotFoundError(f"No patient .txt files found under {path}")
+
+        J = len(patient_files)
+        T = 48
+        D = len(ICU_ATTRIBUTES)
+        attr_to_idx = {attr: idx for idx, attr in enumerate(ICU_ATTRIBUTES)}
+
+        logger.info(f"Parsing {J} ICU patient files into ({J}, {T}, {D}) tensor...")
+        X = np.full((J, T, D), np.nan, dtype=np.float32)
+
+        record_ids = []
+        for j, fpath in enumerate(patient_files):
+            rec_id = int(os.path.splitext(os.path.basename(fpath))[0])
+            record_ids.append(rec_id)
+            with open(fpath, "r", encoding="utf-8") as f:
+                header = f.readline()  # Skip "Time,Parameter,Value"
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split(",")
+                    if len(parts) != 3:
+                        continue
+                    time_str, param, val_str = parts
+                    attr_idx = attr_to_idx.get(param)
+                    if attr_idx is None:
+                        continue
+                    try:
+                        val = float(val_str)
+                    except ValueError:
+                        continue
+                    if val == -1.0 or np.isnan(val):
+                        continue
+                    try:
+                        hour = int(time_str.split(":")[0])
+                    except ValueError:
+                        continue
+                    hour_idx = min(max(hour, 0), T - 1)
+                    X[j, hour_idx, attr_idx] = val
+
+        M = ~np.isnan(X)
+        missing_rate = 1.0 - M.mean()
+        logger.info(f"Parsed ICU tensor: shape={X.shape}, missing_rate={missing_rate:.2%}")
+
+        outcomes_map = self._load_outcomes_map(path)
+        if outcomes_map and all(rid in outcomes_map for rid in record_ids):
+            y = np.array([outcomes_map[rid] for rid in record_ids], dtype=np.int64)
+            logger.info(f"Loaded ICU labels: y.shape={y.shape}, mortality_rate={y.mean():.2%}")
+        else:
+            y = None
+            logger.warning("Incomplete or missing Outcomes files; returning y=None.")
+
+        return X, M, y
 
     def load_icu_labels(self, path: str) -> np.ndarray:
         """
@@ -172,21 +232,19 @@ class DataLoader:
         Parameters
         ----------
         path : str
-            Path to ICU raw directory containing Outcomes-a.txt.
+            Path to ICU raw directory containing Outcomes-a.txt (and Outcomes-b.txt).
 
         Returns
         -------
         y : np.ndarray, shape (J,), dtype int
             1 = in-hospital death, 0 = survived.
         """
-        # TODO: Parse Outcomes-a.txt and Outcomes-b.txt
-        # Format: RecordID, SAPS-I, SOFA, Length_of_stay, Survival, In-hospital_death
-        outcomes_path = os.path.join(path, "Outcomes-a.txt")
-        if not os.path.exists(outcomes_path):
-            raise FileNotFoundError(f"Labels file not found: {outcomes_path}")
+        outcomes_a = os.path.join(path, "Outcomes-a.txt")
+        if not os.path.exists(outcomes_a):
+            raise FileNotFoundError(f"Labels file not found: {outcomes_a}")
 
-        # TODO: implement
-        raise NotImplementedError("TODO: Implement load_icu_labels.")
+        outcomes_map = self._load_outcomes_map(path)
+        return np.array([outcomes_map[k] for k in sorted(outcomes_map.keys())], dtype=np.int64)
 
     # ------------------------------------------------------------------
     # Airquality Dataset

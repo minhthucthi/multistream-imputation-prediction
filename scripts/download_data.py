@@ -55,7 +55,7 @@ DATASET_INFO = {
     "icu": {
         "name": "PhysioNet Challenge 2012 (ICU)",
         "url": "https://physionet.org/files/challenge-2012/1.0.0/",
-        "requires_auth": True,
+        "requires_auth": False,
         "output_dir": "data/raw/icu/",
         "description": (
             "ICU patient monitoring data: 11,988 patients, 48 hours, 37 physiological attributes.\n"
@@ -159,25 +159,20 @@ def print_instructions(dataset_key: str) -> None:
 
 
 def download_icu(
-    username: str,
-    password: str,
+    username: str = None,
+    password: str = None,
     output_dir: str = "data/raw/icu/",
     force: bool = False
 ) -> bool:
     """
-    Download PhysioNet ICU Challenge 2012 dataset.
-
-    Uses wget with PhysioNet credentials. Requires:
-    1. PhysioNet account
-    2. CITI training completion
-    3. DUA signed for challenge-2012
+    Download PhysioNet ICU Challenge 2012 dataset (Open Access).
 
     Parameters
     ----------
-    username : str
-        PhysioNet username.
-    password : str
-        PhysioNet password.
+    username : str, optional
+        Optional PhysioNet username.
+    password : str, optional
+        Optional PhysioNet password.
     output_dir : str
         Directory to save downloaded files.
     force : bool
@@ -193,7 +188,7 @@ def download_icu(
     files = ["set-a.tar.gz", "set-b.tar.gz", "Outcomes-a.txt", "Outcomes-b.txt"]
 
     logger.info(f"Downloading PhysioNet ICU dataset to: {output_dir}")
-    logger.info("This may take several minutes (set-a.tar.gz ~150MB, set-b.tar.gz ~150MB)")
+    logger.info("This may take a moment (set-a.tar.gz & set-b.tar.gz)...")
 
     for file in files:
         out_path = os.path.join(output_dir, file)
@@ -205,54 +200,27 @@ def download_icu(
         url = base_url + file
         logger.info(f"Downloading: {url}")
 
-        # Try wget first
         try:
-            result = subprocess.run(
-                [
-                    "wget", "-c",
-                    f"--user={username}",
-                    f"--password={password}",
-                    "-P", output_dir,
-                    url
-                ],
-                check=True,
-                capture_output=True,
-                text=True
-            )
+            import requests
+            auth = (username, password) if username and password else None
+            r = requests.get(url, auth=auth, stream=True, timeout=120)
+            r.raise_for_status()
+            with open(out_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
             logger.info(f"Downloaded: {file}")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"wget failed: {e.stderr}")
-            logger.info("Trying with requests library...")
-
+        except ImportError:
+            import urllib.request
             try:
-                import requests
-                from requests.auth import HTTPBasicAuth
-                r = requests.get(url, auth=HTTPBasicAuth(username, password), stream=True)
-                r.raise_for_status()
-                with open(out_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                urllib.request.urlretrieve(url, out_path)
                 logger.info(f"Downloaded: {file}")
             except Exception as e2:
-                logger.error(f"Download failed: {e2}")
+                logger.error(f"Download failed for {file}: {e2}")
                 return False
-
-        except FileNotFoundError:
-            # wget not available
-            logger.warning("wget not found. Using Python requests...")
-            try:
-                import requests
-                from requests.auth import HTTPBasicAuth
-                r = requests.get(url, auth=HTTPBasicAuth(username, password), stream=True)
-                r.raise_for_status()
-                with open(out_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                logger.info(f"Downloaded: {file}")
-            except Exception as e2:
-                logger.error(f"Download failed: {e2}")
-                return False
+        except Exception as e:
+            logger.error(f"Download failed for {file}: {e}")
+            return False
 
     # Extract tar.gz archives
     for archive in ["set-a.tar.gz", "set-b.tar.gz"]:
@@ -260,11 +228,14 @@ def download_icu(
         if os.path.exists(archive_path):
             set_name = archive.replace(".tar.gz", "")
             extract_dir = os.path.join(output_dir, set_name)
+            if os.path.exists(extract_dir) and len(os.listdir(extract_dir)) > 0 and not force:
+                logger.info(f"Already extracted: {extract_dir}/")
+                continue
             os.makedirs(extract_dir, exist_ok=True)
             logger.info(f"Extracting {archive}...")
             import tarfile
             with tarfile.open(archive_path, "r:gz") as tar:
-                tar.extractall(path=extract_dir)
+                tar.extractall(path=output_dir)
             logger.info(f"Extracted to: {extract_dir}/")
 
     logger.info("ICU dataset download complete!")
@@ -371,17 +342,8 @@ def main():
             continue
 
         if dataset_key == "icu":
-            if not args.physionet_user:
-                logger.error(
-                    "PhysioNet username required for ICU dataset.\n"
-                    "Usage: python scripts/download_data.py --dataset icu "
-                    "--physionet_user YOUR_USERNAME"
-                )
-                print_instructions("icu")
-                continue
-
             password = args.physionet_password
-            if not password:
+            if args.physionet_user and not password:
                 import getpass
                 password = getpass.getpass(f"PhysioNet password for '{args.physionet_user}': ")
 

@@ -98,6 +98,8 @@ def parse_args():
                         help="Fraction of observed values to hide for evaluation.")
     parser.add_argument("--max_windows", type=int, default=None,
                         help="Max number of windows to process (for quick testing).")
+    parser.add_argument("--max_streams", type=int, default=None,
+                        help="Max number of streams/patients to load (to limit memory usage).")
     parser.add_argument("--synthetic", action="store_true", default=False,
                         help="Generate synthetic dataset for quick testing without raw files.")
 
@@ -124,6 +126,8 @@ def apply_overrides(config: dict, args) -> dict:
         config.setdefault("mpin", {})["lr"] = args.lr
     if args.window_size is not None:
         config.setdefault(args.dataset, {})["window_size"] = args.window_size
+    if args.max_streams is not None:
+        config.setdefault(args.dataset, {})["max_streams"] = args.max_streams
     config.setdefault("general", {})["seed"] = args.seed
     return config
 
