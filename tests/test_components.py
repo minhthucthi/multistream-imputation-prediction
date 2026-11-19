@@ -11,7 +11,6 @@ import torch
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from data.preprocessor import create_data_chunk, compute_importance_score
 from models.similarity_graph import build_similarity_graph
 from models.mpin import MPIN
 from evaluation.metrics import mae, mre
@@ -43,18 +42,18 @@ class TestMPINPipeline(unittest.TestCase):
         self.assertAlmostEqual(val_mre, 0.25, places=4)
 
     def test_similarity_graph(self):
-        adj = build_similarity_graph(self.X, self.M, k=2, metric="euclidean")
+        adj, _ = build_similarity_graph(self.X, self.M, k=2, metric="euclidean")
         self.assertEqual(adj.shape, (4, 4))
         # Self-connections or neighbors should exist
         self.assertTrue(np.all(adj >= 0))
 
     def test_mpin_forward(self):
-        model = MPIN(num_attributes=3, num_layers=2)
+        model = MPIN(D=3, num_layers=2)
         adj = torch.eye(4)
         x_tensor = torch.tensor(np.nan_to_num(self.X, nan=0.0), dtype=torch.float32)
         m_tensor = torch.tensor(self.M, dtype=torch.float32)
 
-        out = model(x_tensor, adj, m_tensor)
+        out = model(x_tensor, adj, x_tensor, m_tensor)
         self.assertEqual(out.shape, (4, 3))
         # Verify bound condition: observed values must remain intact in output
         observed_mask = (m_tensor == 1.0)
